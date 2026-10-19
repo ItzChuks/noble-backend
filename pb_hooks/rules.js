@@ -34,4 +34,7 @@ function quoteFor(st, amount) {
   return { ok: n > 0, n: c, late, penalty: late * st.pen, base: c * st.A, min: st.cost(0) };
 }
 
-module.exports = { RULES, parseTs, planState, quoteFor };
+// when a plan's saving period ends = the deadline of its last instalment (payouts open after this moment)
+const termEnd = (sub, pl) => dueAt(pl.frequency, firstDue(pl.frequency, parseTs(sub.created)), pl.duration - 1);
+
+module.exports = { RULES, parseTs, planState, quoteFor, termEnd };

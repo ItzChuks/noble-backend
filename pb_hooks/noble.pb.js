@@ -50,9 +50,10 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "payments");
 
-// Payout requests: only for a fully saved plan, one open request at a time.
+// Payout requests: only for a fully saved plan AFTER its saving period has ended; one open request at a time; never twice once paid.
 onRecordCreateRequest((e) => {
   if (e.hasSuperuserAuth()) return e.next();
+  const R = require(`${__hooks}/rules.js`);
   const uid = e.auth.id, sid = e.record.getString("subscription");
   let subRec;
   try { subRec = $app.findRecordById("subscriptions", sid); } catch (_) { throw new BadRequestError("Subscription not found."); }
@@ -63,8 +64,12 @@ onRecordCreateRequest((e) => {
   const saved = $app.findRecordsByFilter("payments", "subscription = {:s} && status = 'confirmed'", "", 0, 0, { s: sid })
     .reduce((a, r) => a + r.getFloat("amount") - r.getFloat("penalty"), 0);
   if (saved < plan.getFloat("amount") * plan.getInt("duration")) throw new BadRequestError("This plan is not fully paid and confirmed yet.");
-  const open = $app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'pending'", "", 1, 0, { s: sid });
-  if (open.length) throw new BadRequestError("You already have a payout request waiting.");
+
+  const end = R.termEnd({ created: subRec.getString("created") }, { frequency: plan.getString("frequency"), duration: plan.getInt("duration") });
+  if (new Date() < end) throw new BadRequestError("Payouts open when your saving period ends, on " + end.toISOString().slice(0, 10) + ".");
+
+  if ($app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'confirmed'", "", 1, 0, { s: sid }).length) throw new BadRequestError("This plan has already been paid out.");
+  if ($app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'pending'", "", 1, 0, { s: sid }).length) throw new BadRequestError("You already have a payout request waiting.");
   e.record.set("user", uid);
   e.record.set("status", "pending");
   e.next();
