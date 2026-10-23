@@ -1,10 +1,16 @@
 /// <reference path="../pb_data/types.d.ts" />
-// Server-side enforcement for Noble's Groceries. The browser calculates penalties for display only;
+// Server-side enforcement for Nobles Groceries. The browser calculates penalties for display only;
 // these hooks recompute everything, so editing the page (or calling the API directly) cannot dodge a penalty.
 
-// New accounts are always plain members. (Only a superuser can create or promote an admin.)
+// New accounts are always plain members, unregistered (t-shirt fee unpaid), and must accept the Terms and Conditions.
+// (Only a superuser can create or promote an admin.)
 onRecordCreateRequest((e) => {
-  if (!e.hasSuperuserAuth()) e.record.set("role", "user");
+  if (!e.hasSuperuserAuth()) {
+    if (!e.record.getBool("terms_accepted")) throw new BadRequestError("You must accept the Terms and Conditions to create an account.");
+    e.record.set("role", "user");
+    e.record.set("shirt_paid", false);
+    e.record.set("terms_accepted_at", new Date().toISOString().replace("T", " "));
+  }
   e.next();
 }, "users");
 
@@ -14,6 +20,7 @@ onRecordCreateRequest((e) => {
   let plan;
   try { plan = $app.findRecordById("plans", e.record.getString("plan")); } catch (_) { throw new BadRequestError("That plan does not exist."); }
   if (!plan.getBool("active")) throw new BadRequestError("That plan is not open for enrolment.");
+  require(`${__hooks}/fees.js`).requireShirt($app, e.auth.id);
   e.record.set("status", "active");
   e.next();
 }, "subscriptions");
@@ -50,26 +57,14 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "payments");
 
-// Payout requests: only for a fully saved plan AFTER its saving period has ended; one open request at a time; never twice once paid.
+// Payout requests are created by the server once the 3000 clearance fee is verified (see fees.js). This guard is a safety net:
+// the collection rule already blocks direct member requests, and the same checks apply to anything that gets through.
 onRecordCreateRequest((e) => {
   if (e.hasSuperuserAuth()) return e.next();
-  const R = require(`${__hooks}/rules.js`);
-  const uid = e.auth.id, sid = e.record.getString("subscription");
-  let subRec;
-  try { subRec = $app.findRecordById("subscriptions", sid); } catch (_) { throw new BadRequestError("Subscription not found."); }
-  if (subRec.getString("user") !== uid) throw new ForbiddenError("That is not your plan.");
-  if (subRec.getString("status") === "cancelled") throw new BadRequestError("This plan was cancelled.");
-  const plan = $app.findRecordById("plans", subRec.getString("plan"));
-
-  const saved = $app.findRecordsByFilter("payments", "subscription = {:s} && status = 'confirmed'", "", 0, 0, { s: sid })
-    .reduce((a, r) => a + r.getFloat("amount") - r.getFloat("penalty"), 0);
-  if (saved < plan.getFloat("amount") * plan.getInt("duration")) throw new BadRequestError("This plan is not fully paid and confirmed yet.");
-
-  const end = R.termEnd({ created: subRec.getString("created") }, { frequency: plan.getString("frequency"), duration: plan.getInt("duration") });
-  if (new Date() < end) throw new BadRequestError("Payouts open when your saving period ends, on " + end.toISOString().slice(0, 10) + ".");
-
-  if ($app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'confirmed'", "", 1, 0, { s: sid }).length) throw new BadRequestError("This plan has already been paid out.");
-  if ($app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'pending'", "", 1, 0, { s: sid }).length) throw new BadRequestError("You already have a payout request waiting.");
+  const X = require(`${__hooks}/fees.js`), uid = e.auth.id;
+  X.requireShirt($app, uid);
+  const why = X.payoutProblem($app, uid, e.record.getString("subscription"));
+  if (why) throw new BadRequestError(why);
   e.record.set("user", uid);
   e.record.set("status", "pending");
   e.next();

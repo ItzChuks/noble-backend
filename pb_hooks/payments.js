@@ -1,8 +1,9 @@
 // Shared payment quote logic: the same checks the old "create payment" hook did, reusable by the Flutterwave routes.
 // Throws BadRequestError / ForbiddenError (shown to the member) when the payment is not allowed.
-const R = require(`${__hooks}/rules.js`);
+const R = require(`${__hooks}/rules.js`), X = require(`${__hooks}/fees.js`);
 
 function quote(app, uid, sid, amount) {
+  X.requireShirt(app, uid);   // unregistered members (t-shirt fee unpaid) cannot make any payment
   let subRec;
   try { subRec = app.findRecordById("subscriptions", sid); } catch (_) { throw new BadRequestError("Subscription not found."); }
   if (subRec.getString("user") !== uid) throw new ForbiddenError("That is not your plan.");

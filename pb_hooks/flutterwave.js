@@ -25,15 +25,23 @@ function api(method, path, payload) {
   return r.json || {};
 }
 
+// A tx_ref belongs either to a contribution payment ("payments") or to a fee ("fees": t-shirt, joining, clearance).
+function lookup(app, ref) {
+  for (const c of ["payments", "fees"]) {
+    try { return { coll: c, rec: app.findFirstRecordByData(c, "tx_ref", ref) }; } catch (_) { /* not in this collection */ }
+  }
+  return null;
+}
+
 // Moves a payment out of "pending" exactly once (safe if the webhook and the browser return arrive together).
 // verified = Flutterwave's verify response (or null). abandon = the checkout was cancelled / timed out, so anything not
 // successful is rejected. Returns the payment's resulting status: confirmed | pending | rejected | unknown.
 function settle(txRef, verified, abandon) {
   let out = "pending";
   $app.runInTransaction((tx) => {
-    let rec;
-    try { rec = tx.findFirstRecordByData("payments", "tx_ref", txRef); } catch (_) { out = "unknown"; return; }
-    const st = rec.getString("status");
+    const hit = lookup(tx, txRef);
+    if (!hit) { out = "unknown"; return; }
+    const rec = hit.rec, st = rec.getString("status");
     // a payment we auto-rejected as abandoned can still be revived if Flutterwave later reports it paid
     const revivable = st === "rejected" && rec.getString("note").startsWith("AUTO:");
     out = st;
@@ -53,6 +61,8 @@ function settle(txRef, verified, abandon) {
       }
       tx.save(rec);
       out = rec.getString("status");
+      // a verified fee does its job in the same transaction: register the member, join the plan, or send the payout request
+      if (hit.coll === "fees" && out === "confirmed") require(`${__hooks}/fees.js`).apply(tx, rec);
       return;
     }
     if (abandon && st === "pending") {
@@ -71,4 +81,4 @@ function verifyAndSettle(txRef, abandon) {
   return settle(txRef, j, !!abandon);
 }
 
-module.exports = { cfg, api, settle, verifyAndSettle, CURRENCY };
+module.exports = { cfg, api, lookup, settle, verifyAndSettle, CURRENCY };
