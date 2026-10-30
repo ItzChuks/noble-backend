@@ -2,7 +2,7 @@
 // Server-side enforcement for Nobles Groceries. The browser calculates penalties for display only;
 // these hooks recompute everything, so editing the page (or calling the API directly) cannot dodge a penalty.
 
-// New accounts are always plain members, unregistered (t-shirt fee unpaid), and must accept the Terms and Conditions.
+// New accounts are always plain members, unregistered (t-shirt fee unpaid: only needed to request a payout), and must accept the Terms and Conditions.
 // (Only a superuser can create or promote an admin.)
 onRecordCreateRequest((e) => {
   if (!e.hasSuperuserAuth()) {
@@ -20,7 +20,6 @@ onRecordCreateRequest((e) => {
   let plan;
   try { plan = $app.findRecordById("plans", e.record.getString("plan")); } catch (_) { throw new BadRequestError("That plan does not exist."); }
   if (!plan.getBool("active")) throw new BadRequestError("That plan is not open for enrolment.");
-  require(`${__hooks}/fees.js`).requireShirt($app, e.auth.id);
   e.record.set("status", "active");
   e.next();
 }, "subscriptions");
@@ -58,11 +57,11 @@ onRecordCreateRequest((e) => {
 }, "payments");
 
 // Payout requests are created by the server once the 3000 clearance fee is verified (see fees.js). This guard is a safety net:
-// the collection rule already blocks direct member requests, and the same checks apply to anything that gets through.
+// the collection rule already blocks direct member requests, and the same checks apply to anything that gets through
+// (saving period over, plan fully paid, ANOTHER plan actively running, t-shirt fee paid).
 onRecordCreateRequest((e) => {
   if (e.hasSuperuserAuth()) return e.next();
   const X = require(`${__hooks}/fees.js`), uid = e.auth.id;
-  X.requireShirt($app, uid);
   const why = X.payoutProblem($app, uid, e.record.getString("subscription"));
   if (why) throw new BadRequestError(why);
   e.record.set("user", uid);

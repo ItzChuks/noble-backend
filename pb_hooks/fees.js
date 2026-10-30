@@ -1,14 +1,28 @@
 // Fees and registration rules, enforced on the server.
-//   shirt      ₦5,000  one time, compulsory: until it is paid the member cannot do anything else ("unregistered")
+//   shirt      ₦5,000  one time. Members can use the dashboard, join plans and pay contributions without it;
+//                      it is only required when they request a payout ("unregistered" members cannot request payouts)
 //   join       ₦3,000  paid every time a member joins a plan; the plan is joined automatically once the payment is verified
 //   clearance  ₦3,000  paid with every payout request; the request is sent automatically once the payment is verified
+// A payout request also needs ANOTHER plan of the same member to be actively running (see runningElsewhere).
 // KEEP IN SYNC with FEES in the frontend app.js (that copy is for display only).
 const FEES = { shirt: 5000, join: 3000, clearance: 3000 };
 const R = require(`${__hooks}/rules.js`);
-const SHIRT_MSG = "Please pay the one-time ₦5,000 t-shirt registration fee first.";
+const SHIRT_MSG = "Please pay the one-time ₦5,000 t-shirt fee before you request a payout.";
+const NEED_PLAN_MSG = "To request a payout you must have another plan actively running. Join a new plan first, then request this payout.";
 
 const isRegistered = (app, uid) => app.findRecordById("users", uid).getBool("shirt_paid");
-function requireShirt(app, uid) { if (!isRegistered(app, uid)) throw new BadRequestError(SHIRT_MSG); }
+
+// True when the member has another plan (not the one being paid out) that is still running:
+// status active and its saving period has not ended yet.
+function runningElsewhere(app, uid, sid) {
+  const now = new Date();
+  return app.findRecordsByFilter("subscriptions", "user = {:u} && status = 'active' && id != {:s}", "", 0, 0, { u: uid, s: sid }).some(s => {
+    try {
+      const plan = app.findRecordById("plans", s.getString("plan"));
+      return now < R.termEnd({ created: s.getString("created") }, { frequency: plan.getString("frequency"), duration: plan.getInt("duration") });
+    } catch (_) { return false; }
+  });
+}
 
 // Returns a member-facing reason why a payout cannot be requested right now, or "" when it can.
 function payoutProblem(app, uid, sid) {
@@ -27,6 +41,9 @@ function payoutProblem(app, uid, sid) {
 
   if (app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'confirmed'", "", 1, 0, { s: sid }).length) return "This plan has already been paid out.";
   if (app.findRecordsByFilter("payouts", "subscription = {:s} && status = 'pending'", "", 1, 0, { s: sid }).length) return "You already have a payout request waiting.";
+
+  if (!runningElsewhere(app, uid, sid)) return NEED_PLAN_MSG;   // another plan must be actively running
+  if (!isRegistered(app, uid)) return SHIRT_MSG;                // the t-shirt fee is only needed for payouts
   return "";
 }
 
@@ -37,7 +54,6 @@ function prepare(app, user, type, body) {
     if (user.getBool("shirt_paid")) throw new BadRequestError("You have already paid the t-shirt fee.");
     return { amount: FEES.shirt, title: "T-shirt registration fee" };
   }
-  if (!user.getBool("shirt_paid")) throw new BadRequestError(SHIRT_MSG);
 
   if (type === "join") {
     let plan;
@@ -88,4 +104,4 @@ function apply(app, rec) {
   }
 }
 
-module.exports = { FEES, SHIRT_MSG, requireShirt, payoutProblem, prepare, apply };
+module.exports = { FEES, SHIRT_MSG, NEED_PLAN_MSG, payoutProblem, runningElsewhere, prepare, apply };

@@ -5,7 +5,7 @@ PocketBase for Nobles Groceries, deployed on Railway from this repo (see `Docker
 - `pb_migrations/1760000000_noble_init.js`: users fields, plans, subscriptions, payments, payouts.
 - `pb_migrations/1760000001_plans_months.js`: adds `months` to plans (runs once on the next deploy; existing data is kept).
 - `pb_migrations/1760000003_fees_registration.js`: adds `shirt_paid`, `shirt_paid_at`, `terms_accepted`, `terms_accepted_at` to users, the `foodie` plan category, and a `fees` collection. Subscriptions and payouts can now only be created by the server. **Existing members start as unregistered** (`shirt_paid` is false) until they pay the t-shirt fee or an admin marks them registered (Admin > Users).
-- `pb_hooks/fees.js`: the fee rules (t-shirt 5000 once, joining 3000 per plan joined, payout clearance 3000 per request). `FEES` must stay in sync with `FEES` in the frontend `app.js`.
+- `pb_hooks/fees.js`: the fee rules (t-shirt 5000 once, needed only for payouts; joining 3000 per plan joined; payout clearance 3000 per request) and the payout checks (including: another plan must be actively running). `FEES` must stay in sync with `FEES` in the frontend `app.js`.
 - `pb_hooks/`: server-side payment and payout rules. Payouts open only after a plan's saving period ends. `rules.js` must stay in sync with `RULES` in the frontend `app.js`.
 
 Mount a Railway Volume at `/pb/pb_data` so the database survives redeploys.
@@ -27,8 +27,8 @@ How it works: `pay/init` validates the amount with the plan rules and creates a 
 
 All three fees use the same Flutterwave setup as above (`POST /api/noble/fee/init`, same webhook). The server decides the amount, and when Flutterwave confirms the payment it does the follow-up itself:
 
-- **T-shirt (5000)**: sets `shirt_paid` on the member. Until then the server refuses joining fees, contribution payments and payout requests.
+- **T-shirt (5000)**: sets `shirt_paid` on the member. Members can use the dashboard, join plans (joining fee) and pay contributions without it; it is only required to request a payout, and the server refuses a payout request / clearance fee until it is paid.
 - **Joining fee (3000)**: creates the subscription for the chosen plan.
-- **Clearance fee (3000)**: creates the payout request, with the details the member typed.
+- **Clearance fee (3000)**: creates the payout request, with the details the member typed. Besides the saving period being over and the plan fully paid, the member must have **another plan actively running** (status active and its saving period not yet ended) and must have paid the t-shirt fee.
 
 If the follow-up cannot be done (for example the plan was hidden in the meantime), the fee stays confirmed with a `REVIEW:` note, visible to admins under Admin > Fees.
