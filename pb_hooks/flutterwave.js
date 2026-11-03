@@ -1,17 +1,10 @@
-// Flutterwave (v3) helpers. Secrets come from environment variables, never from the browser:
+// Flutterwave (v3) helpers, used ONLY for members' fixed virtual accounts and to verify transfers. Secrets come from environment variables:
 //   FLW_SECRET_KEY    your Flutterwave secret key (FLWSECK-...)
 //   FLW_WEBHOOK_HASH  the "secret hash" you set in Flutterwave > Settings > Webhooks (any long random string)
-//   FRONTEND_URL      where the site is hosted, e.g. https://noblesgroceries.com (no trailing slash)
 const CURRENCY = "NGN";
 const base = () => $os.getenv("FLW_BASE_URL") || "https://api.flutterwave.com/v3"; // override only for local testing
 
-function cfg() {
-  return {
-    secret: $os.getenv("FLW_SECRET_KEY"),
-    hash: $os.getenv("FLW_WEBHOOK_HASH"),
-    front: ($os.getenv("FRONTEND_URL") || "").replace(/\/+$/, ""),
-  };
-}
+const cfg = () => ({ secret: $os.getenv("FLW_SECRET_KEY"), hash: $os.getenv("FLW_WEBHOOK_HASH") });
 
 function api(method, path, payload) {
   const c = cfg();
@@ -25,60 +18,26 @@ function api(method, path, payload) {
   return r.json || {};
 }
 
-// A tx_ref belongs either to a contribution payment ("payments") or to a fee ("fees": t-shirt, joining, clearance).
-function lookup(app, ref) {
-  for (const c of ["payments", "fees"]) {
-    try { return { coll: c, rec: app.findFirstRecordByData(c, "tx_ref", ref) }; } catch (_) { /* not in this collection */ }
-  }
-  return null;
+// The reference we give Flutterwave when creating a member's account. Flutterwave sends it back as tx_ref on every transfer into that account.
+const vaRef = uid => "NOBLE-VA-" + uid;
+
+// Creates the member's permanent NGN virtual account. Flutterwave requires the holder's BVN or NIN for static accounts;
+// it is passed straight through and never stored.
+function createAccount(user, idType, idNumber) {
+  const name = (user.getString("name") || "").trim().split(/\s+/).filter(Boolean);
+  const first = name[0] || "Member", last = name.slice(1).join(" ") || first;
+  const body = { email: user.getString("email"), tx_ref: vaRef(user.id), is_permanent: true, firstname: first, lastname: last, narration: "Nobles Groceries", currency: CURRENCY };
+  body[idType] = idNumber;
+  if (user.getString("phone")) body.phonenumber = user.getString("phone");
+  const j = api("POST", "/virtual-account-numbers", body);
+  if (j.status !== "success" || !j.data || !j.data.account_number) throw new BadRequestError("Could not create your account number: " + (j.message || "unknown error from Flutterwave"));
+  return { number: String(j.data.account_number), bank: String(j.data.bank_name || ""), ref: body.tx_ref };
 }
 
-// Moves a payment out of "pending" exactly once (safe if the webhook and the browser return arrive together).
-// verified = Flutterwave's verify response (or null). abandon = the checkout was cancelled / timed out, so anything not
-// successful is rejected. Returns the payment's resulting status: confirmed | pending | rejected | unknown.
-function settle(txRef, verified, abandon) {
-  let out = "pending";
-  $app.runInTransaction((tx) => {
-    const hit = lookup(tx, txRef);
-    if (!hit) { out = "unknown"; return; }
-    const rec = hit.rec, st = rec.getString("status");
-    // a payment we auto-rejected as abandoned can still be revived if Flutterwave later reports it paid
-    const revivable = st === "rejected" && rec.getString("note").startsWith("AUTO:");
-    out = st;
-    if (st !== "pending" && !revivable) return;
-
-    const d = verified && verified.status === "success" ? verified.data : null;
-    if (d && d.status === "successful") {
-      const ok = d.tx_ref === txRef && d.currency === CURRENCY && Number(d.amount) >= rec.getFloat("amount");
-      if (ok) {
-        rec.set("status", "confirmed");
-        rec.set("flw_id", String(d.id));
-        rec.set("note", "Flutterwave · " + txRef);
-      } else {
-        // money moved but doesn't match what we asked for: never auto-confirm, flag it for an admin
-        rec.set("status", "pending");
-        rec.set("note", "REVIEW: Flutterwave reports " + d.amount + " " + d.currency + ", expected " + rec.getFloat("amount") + " " + CURRENCY + " (id " + d.id + ")");
-      }
-      tx.save(rec);
-      out = rec.getString("status");
-      // a verified fee does its job in the same transaction: register the member, join the plan, or send the payout request
-      if (hit.coll === "fees" && out === "confirmed") require(`${__hooks}/fees.js`).apply(tx, rec);
-      return;
-    }
-    if (abandon && st === "pending") {
-      rec.set("status", "rejected");
-      rec.set("note", "AUTO: payment not completed");
-      tx.save(rec);
-      out = "rejected";
-    }
-  });
-  return out;
+// Asks Flutterwave directly about a transaction id (never trusts the webhook body). Returns Flutterwave's data object, or null.
+function verifyTransaction(id) {
+  const j = api("GET", "/transactions/" + encodeURIComponent(String(id)) + "/verify");
+  return j.status === "success" && j.data ? j.data : null;
 }
 
-// Asks Flutterwave directly what happened to this reference (never trusts the browser or the webhook body), then settles.
-function verifyAndSettle(txRef, abandon) {
-  const j = api("GET", "/transactions/verify_by_reference?tx_ref=" + encodeURIComponent(txRef));
-  return settle(txRef, j, !!abandon);
-}
-
-module.exports = { cfg, api, lookup, settle, verifyAndSettle, CURRENCY };
+module.exports = { cfg, api, createAccount, verifyTransaction, vaRef, CURRENCY };
