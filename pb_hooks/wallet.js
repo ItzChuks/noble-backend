@@ -4,7 +4,10 @@
 // so a balance and its ledger line can never disagree.
 const R = require(`${__hooks}/rules.js`);
 const FEES = { shirt: 5000, join: 3000, clearance: 3000 };   // KEEP IN SYNC with FEES in the frontend app.js
-const naira = n => "₦" + Number(n || 0).toLocaleString("en-US");
+// NOTE: PocketBase's JS engine does not support toLocaleString(locale), so numbers and dates are formatted by hand.
+const naira = n => "₦" + String(Math.round(Number(n || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const dayLagos = d => { const l = new Date(d.getTime() + 36e5); return l.getUTCDate() + " " + MONTHS[l.getUTCMonth()]; };
 
 // Adds a ledger line and moves the balance. amount > 0 credits, amount < 0 debits. Throws if the balance would go negative.
 function post(app, uid, amount, kind, note, extra = {}) {
@@ -87,7 +90,7 @@ function joinPlan(app, uid, planId) {
   fee.set("user", uid); fee.set("type", "join"); fee.set("amount", FEES.join); fee.set("status", "confirmed"); fee.set("plan", plan.id); fee.set("subscription", sub.id); fee.set("note", "Wallet");
   app.save(fee);
   if (c) {
-    const S = R.sched(s, pl), upTo = S.due(c - 1).toLocaleDateString("en-GB", { timeZone: "Africa/Lagos", day: "numeric", month: "short" });
+    const S = R.sched(s, pl), upTo = dayLagos(S.due(c - 1));
     const p = new Record(app.findCollectionByNameOrId("payments"));
     p.set("user", uid); p.set("subscription", sub.id); p.set("amount", catchup); p.set("status", "confirmed"); p.set("penalty", 0);
     p.set("installments", c); p.set("late_count", 0); p.set("note", "Catch-up · " + c + " instalment" + (c === 1 ? "" : "s") + " up to " + upTo);
@@ -98,4 +101,14 @@ function joinPlan(app, uid, planId) {
   return { subscription: sub.id, catchup, instalments: c };
 }
 
-module.exports = { FEES, post, credit, collect, joinPlan, balanceOf };
+// Runs fn inside a transaction. A BadRequestError thrown inside loses its message on the way out of the transaction, so it is re-thrown here
+// with the same message (the member sees e.g. "Your wallet needs ₦149,000 ...").
+function inTx(fn) {
+  try { $app.runInTransaction(fn); }
+  catch (err) {
+    const raw = String((err && ((err.value && err.value.message) || err.message)) || err);
+    throw new BadRequestError(raw.replace(/^[\s\S]*?BadRequestError:\s*/, ""));
+  }
+}
+
+module.exports = { FEES, naira, post, credit, collect, joinPlan, balanceOf, inTx };

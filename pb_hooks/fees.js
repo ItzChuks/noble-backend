@@ -58,7 +58,7 @@ function pay(app, uid, type, body) {
     if (extra.details) rec.set("details", extra.details);
     app.save(rec);
   };
-  const short = amt => { const bal = W.balanceOf(app, uid); if (bal < amt) throw new BadRequestError("Your wallet needs ₦" + amt.toLocaleString("en-US") + " for this. You have ₦" + bal.toLocaleString("en-US") + ". Please top up ₦" + (amt - bal).toLocaleString("en-US") + "."); };
+  const short = amt => { const bal = W.balanceOf(app, uid); if (bal < amt) throw new BadRequestError("Your wallet needs " + W.naira(amt) + " for this. You have " + W.naira(bal) + ". Please top up " + W.naira(amt - bal) + "."); };
 
   if (type === "join") return W.joinPlan(app, uid, body.plan);
 

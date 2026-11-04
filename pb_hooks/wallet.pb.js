@@ -53,7 +53,7 @@ routerAdd("POST", "/api/noble/wallet/credit", (e) => {
   if (!(amount > 0)) throw new BadRequestError("Enter an amount.");
   if (!ref) throw new BadRequestError("Enter the bank transfer reference, so the same transfer cannot be credited twice.");
   let ok = false;
-  $app.runInTransaction((tx) => {
+  W.inTx((tx) => {
     try { tx.findRecordById("users", uid); } catch (_) { throw new BadRequestError("Member not found."); }
     ok = W.credit(tx, uid, amount, "MANUAL-" + ref, "Credited by admin · " + ref);
     if (ok) W.collect(tx, uid);
@@ -65,10 +65,10 @@ routerAdd("POST", "/api/noble/wallet/credit", (e) => {
 // 4) Pay a fee or join a plan from the wallet: t-shirt (once), joining fee (per plan joined, plus the catch-up on a mid-season cash/foodie plan),
 //    payout clearance fee (per payout request). The amount is decided here, never by the browser.
 routerAdd("POST", "/api/noble/fee/pay", (e) => {
-  const X = require(`${__hooks}/fees.js`);
+  const X = require(`${__hooks}/fees.js`), W = require(`${__hooks}/wallet.js`);
   const body = e.requestInfo().body || {}, uid = e.auth.id, type = String(body.type || "");
   let out = {};
-  $app.runInTransaction((tx) => { out = X.pay(tx, uid, type, body) || {}; });
+  W.inTx((tx) => { out = X.pay(tx, uid, type, body) || {}; });
   return e.json(200, Object.assign({ ok: true }, out));
 }, $apis.requireAuth());
 
