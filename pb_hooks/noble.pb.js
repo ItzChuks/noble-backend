@@ -15,15 +15,61 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "users");
 
+// Every new member is given a payment provider automatically (balanced random draw, see gateways.js). If no provider is set up yet,
+// the member is picked up later by the 15-minute job (wallet.pb.js) or at their first deposit.
+onRecordAfterCreateSuccess((e) => {
+  e.next();
+  try { require(`${__hooks}/gateways.js`).assign(e.app, e.record.id); } catch (err) { console.log("noble gateway assign:", e.record.id, String(err)); }
+}, "users");
+
+// ---- suspended accounts ----
+// A suspended member cannot sign in, and every request made with an existing session is refused with the reason.
+onRecordAuthRequest((e) => {
+  if (e.record.getBool("suspended") && e.record.getString("role") !== "admin")
+    throw new ForbiddenError("Your account has been suspended" + (e.record.getString("suspended_reason") ? ": " + e.record.getString("suspended_reason").replace(/[.!?\s]*$/, "") + "." : ".") + " Please contact customer care.");
+  e.next();
+}, "users");
+routerUse((e) => {
+  const a = e.auth;
+  if (a && a.collection().name === "users" && a.getBool("suspended") && a.getString("role") !== "admin")
+    throw new ForbiddenError("Your account has been suspended" + (a.getString("suspended_reason") ? ": " + a.getString("suspended_reason").replace(/[.!?\s]*$/, "") + "." : ".") + " Please contact customer care.");
+  return e.next();
+});
+
 // Wallet fields can only be changed by the server (top-ups, fees, collections), never through the API, not even by an admin.
 onRecordUpdateRequest((e) => {
   if (e.hasSuperuserAuth()) return e.next();
   const o = e.record.original();
+  for (const f of ["suspended", "suspended_reason", "suspended_at", "must_change_password", "reset_code", "reset_until", "reset_tries"]) if (e.record.get(f) + "" !== o.get(f) + "") throw new BadRequestError("That field cannot be changed.");   // admin routes only
   for (const f of ["wallet_balance", "va_number", "va_bank", "va_ref"]) {
     if (f === "wallet_balance" ? e.record.getFloat(f) !== o.getFloat(f) : e.record.getString(f) !== o.getString(f)) throw new BadRequestError("That field cannot be changed.");
   }
+  // the payment provider is given by the server (or changed by an admin), never chosen by the member
+  if (e.record.getString("gateway") !== o.getString("gateway") || e.record.getBool("gateway_manual") !== o.getBool("gateway_manual")) {
+    if (!e.auth || e.auth.getString("role") !== "admin") throw new BadRequestError("That field cannot be changed.");
+    if (e.record.getString("gateway") && !["flutterwave", "paystack", "monnify"].includes(e.record.getString("gateway"))) throw new BadRequestError("Unknown payment provider.");
+  }
+  // payout details from the Profile page: tidy them and check the account number
+  const acct = e.record.getString("bank_account_number").replace(/\D/g, "");
+  if (e.record.getString("bank_account_number") && acct.length !== 10) throw new BadRequestError("Enter your 10-digit account number.");
+  e.record.set("bank_account_number", acct);
+  for (const f of ["bank_name", "bank_account_name", "address"]) e.record.set(f, e.record.getString(f).trim().slice(0, 300));
+  // home address and payout details: a member fills each one in once; after that only an admin can change it
+  if (!e.auth || e.auth.getString("role") !== "admin") {
+    const L = { address: "home address", bank_name: "bank name", bank_account_name: "account name", bank_account_number: "account number" };
+    for (const f of Object.keys(L)) if (o.getString(f).trim() && e.record.getString(f) !== o.getString(f).trim())
+      throw new BadRequestError("Your " + L[f] + " is locked once saved. Please contact customer care to change it.");
+  }
   e.next();
 }, "users");
+
+// Plan code, payment progress and clearance fields of a membership are written by the server only (not even an admin via the API).
+onRecordUpdateRequest((e) => {
+  if (e.hasSuperuserAuth()) return e.next();
+  const o = e.record.original();
+  for (const f of ["clearance_paid_at", "no_penalty_before", "group_id", "group_lead", "group_size", "code_custom"]) if (e.record.getString(f) !== o.getString(f)) throw new BadRequestError("That field cannot be changed.");
+  e.next();
+}, "subscriptions");
 
 // Joining a plan: only open plans, always starts "active".
 onRecordCreateRequest((e) => {
@@ -35,7 +81,7 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "subscriptions");
 
-// Payout requests are created by the server once the 3000 clearance fee is verified (see fees.js). This guard is a safety net:
+// Payout requests are created by the server once the ₦3,000 clearance fee is verified (see fees.js). This guard is a safety net:
 // the collection rule already blocks direct member requests, and the same checks apply to anything that gets through
 // (saving period over, plan fully paid, ANOTHER plan actively running, t-shirt fee paid).
 onRecordCreateRequest((e) => {
@@ -47,3 +93,31 @@ onRecordCreateRequest((e) => {
   e.record.set("status", "pending");
   e.next();
 }, "payouts");
+
+// When an admin confirms, rejects or deletes a payment, the plan's stored progress (paid_count / next_collect) is worked out again.
+// (Payments the server creates itself keep the plan up to date directly, see wallet.js.)
+// (Handlers are isolated, so the code is written out in each one.)
+onRecordAfterUpdateSuccess((e) => {
+  e.next();
+  const sid = e.record.getString("subscription");
+  if (sid) try { require(`${__hooks}/wallet.js`).syncSub(e.app, sid); } catch (err) { console.log("noble resync:", sid, String(err)); }
+}, "payments");
+onRecordAfterDeleteSuccess((e) => {
+  e.next();
+  const sid = e.record.getString("subscription");
+  if (sid) try { require(`${__hooks}/wallet.js`).syncSub(e.app, sid); } catch (err) { if (!/no rows/.test(String(err))) console.log("noble resync:", sid, String(err)); }   // plan deleted too: nothing to do
+}, "payments");
+
+// ---- plan codes: the admin picks the day a grocery plan's codes come out and their last day (Admin > Plans) ----
+// Days are "YYYY-MM-DD" (Lagos calendar). Only grocery plans have codes; the days are cleared on other plans.
+onRecordCreateRequest((e) => { require(`${__hooks}/rules.js`).checkCodeDays(e.record); e.next(); }, "plans");
+// new dates reach every unused code of that plan (codes given their own dates on a member's page keep them)
+onRecordUpdateRequest((e) => {
+  require(`${__hooks}/rules.js`).checkCodeDays(e.record);
+  const r = e.record, o = r.original();
+  const changed = r.getString("code_open_day") !== o.getString("code_open_day") || r.getString("code_close_day") !== o.getString("code_close_day") || r.getString("category") !== o.getString("category");
+  e.next();
+  if (!changed) return;
+  try { const W = require(`${__hooks}/wallet.js`); $app.runInTransaction((tx) => { const n = W.applyPlanCodeDates(tx, tx.findRecordById("plans", r.id)); if (n) console.log("noble: plan", r.id, "code dates applied to", n, "codes"); }); }
+  catch (err) { console.log("noble: plan code dates", r.id, String(err)); }
+}, "plans");

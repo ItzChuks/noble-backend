@@ -38,3 +38,27 @@ Members no longer pay each contribution by hand. Each member has a **wallet** an
 If a transfer arrives but the webhook never does, an admin can credit it under Admin > Users > (member) > Credit wallet, using the bank reference (the same reference can only be credited once).
 
 `rules.js` (here) and `app.js` (frontend) hold the same rules and must be kept in sync, as must `FEES` in `fees.js`/`wallet.js` and `app.js`.
+
+
+## Jessy James features (migrations 1760000005 to 1760000021, Nov 2026)
+
+The hooks are the Jessy James backend adapted for Nobles Groceries: routes under `/api/noble/`, Cash / Foodie / Grocery plans,
+and plan codes for **Grocery plans only** on dates the admin picks. Migrations run by themselves on the next deploy.
+
+- `1760000021_code_dates.js`: `plans.code_open_day` / `code_close_day` ("YYYY-MM-DD", the day a Grocery plan's codes come out
+  and their last day) and `subscriptions.code_custom`. Every running Grocery membership gets a code ("not open yet" until you set
+  the plan's days). Grocery plans move to the joining-day schedule; so nobody already saving is penalised by the change, payments
+  due up to the moment of the upgrade are collected at the normal amount.
+- `1760000007` no longer hides Cash and Foodie plans; `1760000009` gives only Grocery plans a payout day.
+- Members who already have a fixed virtual account number keep it: transfers into it are still credited (`flw-webhook`).
+
+### Railway variables (all optional)
+
+- `GEMINI_API_KEY`: automatic receipt reading (flags for the admin). Or `XAI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+- `BREVO_API_KEY` (+ optional `MAIL_FROM`, `MAIL_FROM_NAME`): emails for "Forgot password?" codes (Railway blocks SMTP).
+- `SITE_URL`: your website address, only used by the old reset-link email.
+- `FLW_SECRET_KEY`, `FLW_WEBHOOK_HASH`, `PAYSTACK_SECRET_KEY`, `MONNIFY_*`, `ONLINE_PAYMENTS=on`: online payment partners
+  (paused by default; bank transfer with receipt is used).
+
+Fees (`wallet.js` FEES and `transfers.js` TAX) must match `FEES` in the website's `app.js`: t-shirt 5,000, joining 3,000,
+clearance 3,000 per plan, deposit charge 100.
